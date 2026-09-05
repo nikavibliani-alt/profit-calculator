@@ -3344,9 +3344,16 @@ function _renderHomeQuick(){
     // Chips unchanged — do not rebuild, preserve scroll position
     svcArea.style.display='block';
   }else{
-    // Chips changed — rebuild
+    // Chips changed — rebuild. Belt-and-suspenders: even though this branch
+    // should only fire when content genuinely changed, restore scrollLeft
+    // afterward so the guest never sees a snap-back to the start if a
+    // rebuild happens to fire while they're mid-scroll.
+    const svcScroll=svcArea.querySelector('.home-svc-scroll');
+    const savedScroll=svcScroll?svcScroll.scrollLeft:0;
     svcArea.style.display='block';
     svcArea.innerHTML=`<div class="home-svc-scroll">${newInnerHtml}</div>`;
+    const newScroll=svcArea.querySelector('.home-svc-scroll');
+    if(newScroll&&savedScroll>0)newScroll.scrollLeft=savedScroll;
   }
 }
 
