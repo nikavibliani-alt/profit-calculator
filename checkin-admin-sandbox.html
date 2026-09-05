@@ -1576,7 +1576,7 @@ window.gsSaveAll=async function(){
       visibility:gsVisibility,laundryItems:gsLaundry,services:gsServices,sectionLabels:gsSectionLabels,
       roomCategories:gsRoomCategories,locationInfo:gsLocationInfo,parkingInfo:gsParkingInfo,waitingTabs,hkSettings,
       updatedAt:serverTimestamp()
-    });
+    },{merge:true});
     gsDirty=false;document.getElementById('gs-save-bar')?.classList.remove('show');
     toast('Guest page saved ✓');
   }catch(e){toast('Save failed: '+e.message);}
