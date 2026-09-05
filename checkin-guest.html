@@ -2597,13 +2597,32 @@ window.searchReservation=async function(){
     return;
   }
   const btn=document.getElementById('search-btn');
+  const originalBtnText='Find my booking';
   btn.disabled=true;
   document.getElementById('t-search-btn').textContent='Verifying...';
+  // Failsafe: force-reset the button if the query below never settles at all
+  // (stalled connection — neither resolves nor rejects). Same pattern already
+  // used for the passport-upload timeout/failsafe.
+  const _searchFailsafe=setTimeout(()=>{
+    if(btn.disabled){
+      btn.disabled=false;
+      document.getElementById('t-search-btn').textContent=originalBtnText;
+      toast('Connection timeout — please try again.');
+    }
+  },20000);
   try{
-    const {getDocs:_getDocs}=await import('https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js');
-    const resSnap=aptId
-      ?await _getDocs(query(collection(db,'reservations'),where('roomCode','==',aptId)))
-      :await _getDocs(collection(db,'reservations'));
+    const {getDocs:_getDocs,orderBy:_orderBy}=await import('https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js');
+    // No room-specific link (aptId empty): limit to the last 2 months of
+    // arrivals instead of reading the entire reservations collection —
+    // covers any current/upcoming guest, far less likely to stall.
+    const _searchCutoff=new Date();
+    _searchCutoff.setMonth(_searchCutoff.getMonth()-2);
+    const _searchCutoffStr=_searchCutoff.toISOString().slice(0,10);
+    const queryPromise=aptId
+      ?_getDocs(query(collection(db,'reservations'),where('roomCode','==',aptId)))
+      :_getDocs(query(collection(db,'reservations'),where('checkin','>=',_searchCutoffStr),_orderBy('checkin','desc'),limit(500)));
+    const timeoutPromise=new Promise((_,reject)=>setTimeout(()=>reject(new Error('Query timeout')),15000));
+    const resSnap=await Promise.race([queryPromise,timeoutPromise]);
     const allScored=[];
     let _bestMatch=null,_bestScore=0;
     resSnap.forEach(d=>{
@@ -2722,6 +2741,8 @@ window.searchReservation=async function(){
     btn.disabled=false;
     document.getElementById('t-search-btn').textContent='Find my booking';
     if(!_uploadAborted){toast('Verification failed — please try again.');}
+  }finally{
+    clearTimeout(_searchFailsafe);
   }
 }
 
