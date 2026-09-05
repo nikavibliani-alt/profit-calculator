@@ -602,6 +602,12 @@ html.standalone-hk.hk-authed #hk-pin-screen{display:none!important;}
     <div id="req-list"></div>
   </div>
 
+  <div class="pane" id="pane-history">
+    <input class="search-box" id="history-search" placeholder="Search name, room, phone…" oninput="renderHistoryUI()">
+    <div class="filter-row" id="history-filters"></div>
+    <div id="history-list"></div>
+  </div>
+
   <div class="pane" id="pane-apts">
     <div class="apt-sync-note">MiniHotel sync updates reservations only — your room list and apartment content stay as you set them here.</div>
     <div class="apt-toolbar">
@@ -674,6 +680,7 @@ html.standalone-hk.hk-authed #hk-pin-screen{display:none!important;}
     <div class="more-list">
       <button class="more-item" type="button" onclick="switchTab('hk')">Housekeeping</button>
       <button class="more-item" type="button" onclick="switchTab('apts')">Apartments</button>
+      <button class="more-item" type="button" onclick="switchTab('history')">Guest history</button>
       <button class="more-item" type="button" onclick="switchTab('failures')" id="more-failures-btn">Failed searches<span class="more-badge" id="sf-more-badge" style="display:none">0</span></button>
     </div>
     <div class="more-section">Guest experience</div>
@@ -744,11 +751,16 @@ html.standalone-hk.hk-authed #hk-pin-screen{display:none!important;}
   </div>
 </div>
 
+<div id="history-photo-lightbox" onclick="window.closeHistoryPhoto()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:250;align-items:center;justify-content:center;padding:24px;">
+  <img id="history-photo-lightbox-img" style="max-width:100%;max-height:100%;border-radius:8px;" onclick="event.stopPropagation()">
+</div>
+
 <script src="shared/elevator-sync.js"></script>
 <script type="module">
 /* ADMIN SANDBOX — see GUEST_CHECKIN_REDESIGN.md §22.9
  * Tabs: stay | hk | requests | elevator | more (+ sub: apts, guestsettings, failures, navsettings)
  * Overlays (full-screen, z-index stack): #detail → #apt-editor → #req-detail → #gp-editor
+ *   → #history-photo-lightbox
  * Nav: switchTab() + localStorage tab; goBack() / header ← for More sub-pages & overlays
  * Data: one onSnapshot per collection → render*() for active tab only
  */
@@ -1062,7 +1074,7 @@ async function syncRoomsFromSeed(){
 let aptData={},guestData=[],hkStatusData={},_resCache=null,_resLoading=false;
 let elevData=null,stayFilter='overview',upcomingDay=null,_currentAptId=null;
 const _TAB_KEY='maxela_admin_tab';
-const VALID_TABS=new Set(['stay','elevator','requests','apts','hk','guestsettings','wasettings','failures','navsettings','hksettings','more']);
+const VALID_TABS=new Set(['stay','elevator','requests','apts','hk','guestsettings','wasettings','failures','navsettings','hksettings','history','more']);
 
 const _NAV_KEY='maxela_admin_nav_v5';
 const NAV_MIN=2;
@@ -1073,6 +1085,7 @@ const NAV_POOL={
   elevator:{label:'Elevator',pane:'elevator',icon:'arrow-up-down',extra:'<span class="dot"></span>',navId:'nav-elev'},
   requests:{label:'Requests',pane:'requests',icon:'message-square',extra:'<span class="badge" id="req-badge">0</span>',navId:'nav-req'},
   apts:{label:'Apts',pane:'apts',icon:'home',extra:''},
+  history:{label:'History',pane:'history',icon:'clock',extra:''},
 };
 function navTabSvg(id,size=22){return featherIcon(NAV_POOL[id]?.icon||'circle',size,1.8);}
 const DEFAULT_NAV_CONFIG={slots:['stay','requests','elevator'],landingTab:'stay'};
@@ -1145,7 +1158,7 @@ function renderNavBar(){
     if(!d)continue;
     html+=`<button class="nav__btn${currentTab===d.pane?' active':''}" data-tab="${d.pane}" onclick="switchTab('${d.pane}')" ${d.navId?`id="${d.navId}"`:''}>${navTabSvg(id)}${d.label}${d.extra||''}</button>`;
   }
-  html+=`<button class="nav__btn${currentTab==='more'||['apts','guestsettings','wasettings','navsettings','failures','elevator','hksettings','hk'].includes(currentTab)?' active':''}" data-tab="more" onclick="switchTab('more')">${featherIcon('more-horizontal',22,1.8)}More</button>`;
+  html+=`<button class="nav__btn${currentTab==='more'||['apts','guestsettings','wasettings','navsettings','failures','elevator','hksettings','hk','history'].includes(currentTab)?' active':''}" data-tab="more" onclick="switchTab('more')">${featherIcon('more-horizontal',22,1.8)}More</button>`;
   nav.innerHTML=html;
   updateRequestsBadge();
   if(elevData)document.getElementById('nav-elev')?.classList.toggle('has-alert',elevFreshness().cls==='old');
@@ -2784,6 +2797,115 @@ window.renderStay=function(){
   el.innerHTML=sectionBlock(title,groups,mode);
 };
 
+// ── History tab ─────────────────────────────────────────────────────────────
+// Derived purely from data already resident/live-subscribed elsewhere
+// (_resCache, guestData) — no dedicated Firestore read for this tab.
+let _historyData=null,_historyBuiltAt=0,_historyFilter='all';
+const HISTORY_CACHE_MS=5*60*1000;
+
+async function loadAndRenderHistory(force){
+  const el=document.getElementById('history-list');
+  if(!_resCache){
+    if(el)el.innerHTML='<div class="empty">Loading…</div>';
+    await _loadResCache();
+  }
+  if(!_historyData||force||(Date.now()-_historyBuiltAt)>HISTORY_CACHE_MS){
+    if(el&&!_historyData)el.innerHTML='<div class="empty">Loading…</div>';
+    buildHistoryData();
+  }
+  renderHistoryUI();
+}
+
+function buildHistoryData(){
+  const today=new Date().toISOString().slice(0,10);
+  const cutoff=new Date();cutoff.setMonth(cutoff.getMonth()-3);
+  const cutoffStr=cutoff.toISOString().slice(0,10);
+  const rows=nonCancelled().filter(r=>{
+    const co=r.checkout||r.checkOut||'';
+    return co&&co>=cutoffStr&&co<today;
+  });
+  // Returning-guest detection: group by stripped, lowercased guest name
+  // across this 3-month window — 2+ reservations under the same name = returning.
+  const nameCounts={};
+  rows.forEach(r=>{
+    const form=guestFormForReservation(r);
+    const key=_stripRoomNum(form?.nameRoman||form?.name||r.guest||'').toLowerCase().trim();
+    if(key)nameCounts[key]=(nameCounts[key]||0)+1;
+  });
+  _historyData=rows.map(r=>{
+    const form=guestFormForReservation(r);
+    const displayName=_stripRoomNum(form?.nameRoman||form?.name||r.guest||'Guest')||'Guest';
+    const key=displayName.toLowerCase().trim();
+    return{
+      res:r,
+      name:displayName,
+      roomCode:(r.roomCode||r.room||'').trim(),
+      checkin:r.checkin||r.checkIn||'',
+      checkout:r.checkout||r.checkOut||'',
+      source:r.source||'',
+      contact:form?.contact||'',
+      passportUrl:form?.passportUrl||'',
+      passportSkipped:!!form?.passportSkipped,
+      confirmedCheckin:!!form?.guestConfirmedCheckin,
+      returning:(nameCounts[key]||0)>=2,
+    };
+  }).sort((a,b)=>b.checkout.localeCompare(a.checkout));
+  _historyBuiltAt=Date.now();
+}
+
+const HISTORY_FILTERS=[
+  {id:'all',label:'All'},
+  {id:'has',label:'Has Passport'},
+  {id:'no',label:'No Passport'},
+  {id:'returning',label:'Returning'},
+];
+function renderHistoryUI(){
+  const el=document.getElementById('history-list');
+  if(!el)return;
+  if(!_historyData){el.innerHTML='<div class="empty">Loading…</div>';return;}
+  document.getElementById('history-filters').innerHTML=HISTORY_FILTERS.map(f=>
+    `<button class="filter-chip ${_historyFilter===f.id?'active':''}" onclick="setHistoryFilter('${f.id}')">${esc(f.label)}</button>`
+  ).join('');
+  const q=(document.getElementById('history-search')?.value||'').toLowerCase().trim();
+  let rows=_historyData;
+  if(_historyFilter==='has')rows=rows.filter(r=>!!r.passportUrl);
+  else if(_historyFilter==='no')rows=rows.filter(r=>!r.passportUrl);
+  else if(_historyFilter==='returning')rows=rows.filter(r=>r.returning);
+  if(q)rows=rows.filter(r=>[r.name,r.roomCode,r.contact].join(' ').toLowerCase().includes(q));
+  if(!rows.length){el.innerHTML='<div class="empty">No guests in this range</div>';return;}
+  el.innerHTML=rows.map(r=>{
+    const nl=nights({checkin:r.checkin,checkout:r.checkout});
+    const wa=normalizeWaPhone(r.contact||'');
+    const waMsg=encodeURIComponent(`Hi ${r.name}, hope you enjoyed your stay at Maxela! We'd love to welcome you back.`);
+    const ppHtml=r.passportUrl
+      ?`<button type="button" class="btn" style="padding:4px 10px;height:auto;font-size:12px;" onclick="window.openHistoryPassport('${esc(r.passportUrl)}')">📎 View passport</button>`
+      :r.passportSkipped
+        ?`<span class="pill pill-pending">SKIPPED</span>`
+        :`<span style="color:var(--muted);font-size:12px;">— No passport</span>`;
+    return`<div class="card">
+      <div class="card__top">
+        <div style="font-size:16px;font-weight:700;">${esc(r.name)}${r.returning?' <span class="pill pill-pending">RETURNING</span>':''}</div>
+        ${sourceBadgeHtml(r.source)}
+      </div>
+      <div class="card__room">Room ${esc(r.roomCode)}</div>
+      <div style="font-size:13px;color:var(--muted);margin:4px 0 8px;">${fmtDate(r.checkin)} → ${fmtDate(r.checkout)} · ${nl} night${nl!==1?'s':''}</div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">${ppHtml}</div>
+      ${r.contact?`<div class="card__actions">${wa?`<a class="btn" href="https://wa.me/${wa}?text=${waMsg}" target="_blank" rel="noopener">WhatsApp</a>`:`<span style="font-size:12px;color:var(--muted);">${esc(r.contact)}</span>`}</div>`:''}
+    </div>`;
+  }).join('');
+}
+window.setHistoryFilter=function(f){_historyFilter=f;renderHistoryUI();};
+window.openHistoryPassport=function(url){
+  const ov=document.getElementById('history-photo-lightbox');
+  const img=document.getElementById('history-photo-lightbox-img');
+  if(!ov||!img)return;
+  img.src=url;
+  ov.style.display='flex';
+};
+window.closeHistoryPhoto=function(){
+  document.getElementById('history-photo-lightbox').style.display='none';
+};
+
 const TAB_META={
   stay:{title:'Stay',sub:'Overview · arrivals · in-house · upcoming'},
   elevator:{title:'Elevator',sub:'Entrance & elevator code'},
@@ -2791,14 +2913,15 @@ const TAB_META={
   apts:{title:'Apartments',sub:'WiFi, instructions, photo steps'},
   hk:{title:'Housekeeping',sub:'Daily task board · checkouts & done'},
   hksettings:{title:'HK settings',sub:'Staff PINs · cleaner apps · defaults'},
+  history:{title:'History',sub:'Past guests · last 3 months'},
   guestsettings:{title:'Guest page',sub:'Tiles, services, waiting tabs & location'},
   wasettings:{title:'WhatsApp messages',sub:'Outreach templates · check-in invites & replies'},
   failures:{title:'Failed searches',sub:'Guests who could not find booking'},
   navsettings:{title:'Tab bar',sub:'Add tabs · reorder · landing page'},
   more:{title:'More',sub:'All admin tools'},
 };
-const MORE_TABS=new Set(['more','apts','guestsettings','wasettings','navsettings','failures','elevator','hksettings','hk']);
-const MORE_SUB_PAGES=new Set(['apts','guestsettings','wasettings','navsettings','failures','elevator','hksettings','hk']);
+const MORE_TABS=new Set(['more','apts','guestsettings','wasettings','navsettings','failures','elevator','hksettings','hk','history']);
+const MORE_SUB_PAGES=new Set(['apts','guestsettings','wasettings','navsettings','failures','elevator','hksettings','hk','history']);
 
 function updateHeaderBack(){
   const btn=document.getElementById('header-back');
@@ -2839,6 +2962,7 @@ window.switchTab=function(tab){
   if(tab==='elevator')renderElevator();
   if(tab==='requests')loadAndRenderRequests();
   if(tab==='apts')renderAptsList();
+  if(tab==='history')loadAndRenderHistory();
   if(tab==='hk')renderHk();
   if(tab==='hksettings')renderHkSettings();
   if(tab==='guestsettings')loadAndRenderGuestSettings();
